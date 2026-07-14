@@ -5,7 +5,7 @@ import json
 import xml.etree.ElementTree as ET
 import pandas as pd
 import time
-import random
+import uuid
 
 st.set_page_config(page_title="TfL Cycle Route to GPX", page_icon="🚲", layout="centered")
 
@@ -18,9 +18,9 @@ if "current_route" not in st.session_state:
 
 col1, col2 = st.columns(2)
 with col1:
-    start_loc = st.text_input("Start Location", placeholder="e.g., WC1B 3DG")
+    start_loc = st.text_input("Start Location", placeholder="e.g., WC1B 3DG or British Museum")
 with col2:
-    end_loc = st.text_input("End Location", placeholder="e.g., SW11 4NJ")
+    end_loc = st.text_input("End Location", placeholder="e.g., SW11 4NJ or Battersea Park")
 
 bike_proficiency = st.selectbox(
     "Route Type / Cycling Pace",
@@ -30,40 +30,46 @@ bike_proficiency = st.selectbox(
 
 tfl_key = st.text_input("TfL API Primary Key (Optional)", type="password")
 
-def geocode_location(query):
+def geocode_location(query, key=None):
+    """
+    Resolves locations safely without using Nominatim/OpenStreetMap to avoid 429 rate limits.
+    1. Uses postcodes.io for UK postcodes (highly reliable, no limits).
+    2. Uses TfL's native Place Search API for London landmarks, stations, and addresses.
+    """
     clean_query = query.strip().replace(" ", "").upper()
     
-    # 1. Postcodes.io fast-path
+    # --- Step 1: Check if it's a postcode (postcodes.io) ---
     if len(clean_query) >= 5 and len(clean_query) <= 8:
         postcode_url = f"https://api.postcodes.io/postcodes/{clean_query}"
         try:
             res = requests.get(postcode_url, timeout=5)
             if res.status_code == 200:
                 pdata = res.json()["result"]
-                return float(pdata["latitude"]), float(pdata["longitude"]), f"{pdata['postcode']}, London, UK"
+                return float(pdata["latitude"]), float(pdata["longitude"]), f"{pdata['postcode']}, London"
         except Exception:
             pass
 
-    # 2. OpenStreetMap path
-    random_agent = f"tfl_planner_user_{random.randint(100000, 999999)}"
-    headers = {"User-Agent": random_agent}
-    search_query = f"{query}, London, UK" if "london" not in query.lower() else query
-    url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(search_query)}&format=json&limit=1"
-    
+    # --- Step 2: Use TfL's native Place Search (Free, highly optimized for London, never blocks) ---
+    tfl_search_url = "https://api.tfl.gov.uk/Place/Search"
+    params = {"name": query}
+    if key:
+        params["app_key"] = key
+        
     try:
-        time.sleep(0.6)
-        response = requests.get(url, headers=headers, timeout=8)
+        response = requests.get(tfl_search_url, params=params, timeout=8)
         if response.status_code == 200:
             results = response.json()
             if len(results) > 0:
-                data = results[0]
-                return float(data["lat"]), float(data["lon"]), data["display_name"]
+                # Grab the first matched result from TfL's database
+                match = results[0]
+                return float(match["lat"]), float(match["lon"]), match.get("name", query)
             else:
-                st.error(f"🔍 No map results found for '{query}'.")
+                st.error(f"🔍 TfL could not find any locations matching '{query}'.")
         else:
-            st.warning(f"⚠️ Map Server returned code {response.status_code}.")
+            st.error(f"❌ TfL Location Search failed (Code {response.status_code}).")
     except Exception as e:
         st.error(f"❌ Geocoding system error: {str(e)}")
+        
     return None
 
 def get_tfl_route_by_coords(start_coords, end_coords, proficiency, key=None):
@@ -107,11 +113,11 @@ if st.button("Generate Cycle Route", type="primary"):
         st.error("Please enter both locations.")
     else:
         with st.spinner("Finding coordinates..."):
-            start_coords = geocode_location(start_loc)
-            end_coords = geocode_location(end_loc)
+            start_coords = geocode_location(start_loc, tfl_key)
+            end_coords = geocode_location(end_loc, tfl_key)
             
         if start_coords and end_coords:
-            st.info(f"📍 Route: {start_coords[2].split(',')[0]} ➡️ {end_coords[2].split(',')[0]}")
+            st.info(f"📍 Route: {start_coords[2]} ➡️ {end_coords[2]}")
             
             with st.spinner("Fetching route from TfL..."):
                 response = get_tfl_route_by_coords((start_coords[0], start_coords[1]), (end_coords[0], end_coords[1]), bike_proficiency, tfl_key)
@@ -123,7 +129,6 @@ if st.button("Generate Cycle Route", type="primary"):
                         # --- SECURE TEMPORARY EXPORT TRANSIT ---
                         with st.spinner("Preparing secure link for BikeGPX..."):
                             try:
-                                # We upload the GPX file anonymously to file.io. It auto-deletes immediately after being downloaded once.
                                 files = {'file': ('route.gpx', gpx_data, 'application/gpx+xml')}
                                 upload_res = requests.post("https://file.io/?expires=1d", files=files, timeout=10)
                                 if upload_res.status_code == 200 and upload_res.json().get("success"):
@@ -139,7 +144,7 @@ if st.button("Generate Cycle Route", type="primary"):
                             bikegpx_url = None
                         
                         st.session_state.current_route = {
-                            "summary_text": f"📍 Route: {start_coords[2].split(',')[0]} ➡️ {end_coords[2].split(',')[0]}",
+                            "summary_text": f"📍 Route: {start_coords[2]} ➡️ {end_coords[2]}",
                             "coords_df": pd.DataFrame(coords_list),
                             "bikegpx_url": bikegpx_url,
                             "gpx_raw": gpx_data
@@ -149,7 +154,7 @@ if st.button("Generate Cycle Route", type="primary"):
                 else:
                     st.error("TfL couldn't map a cycling path between those locations.")
         else:
-            st.error("Could not trace one or both of those addresses. Check warnings above.")
+            st.error("Could not trace one or both of those locations.")
 
 # --- RENDER UI FROM CACHE MEMORY ---
 if st.session_state.current_route:
