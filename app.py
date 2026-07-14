@@ -9,8 +9,8 @@ from io import BytesIO
 
 st.set_page_config(page_title="TfL Cycle Route Planner", page_icon="🚲", layout="centered")
 
-st.title("🚲 TfL Cycle Route to Phone Generator")
-st.write("Plan a route, view it, and scan the QR code to open it directly on your phone!")
+st.title("🚲 TfL Cycle Route to BikeGPX Generator")
+st.write("Plan a route, view it, and scan the QR code to open it directly in BikeGPX on your phone!")
 
 # Permanent UI memory state
 if "current_route" not in st.session_state:
@@ -97,6 +97,26 @@ def convert_to_gpx(journey_data):
     ET.indent(gpx, space="  ", level=0)
     return ET.tostring(gpx, encoding="utf-8", xml_declaration=True).decode("utf-8"), coordinates
 
+def upload_gpx_for_direct_link(gpx_content):
+    """
+    Uploads the GPX raw content anonymously to tmpfiles.org and gets a direct /dl/ link.
+    Bypasses standard proxy, CORS, and auth rate limits.
+    """
+    url = "https://tmpfiles.org/api/v1/upload"
+    files = {"file": ("tfl_cycle_route.gpx", gpx_content, "application/gpx+xml")}
+    try:
+        response = requests.post(url, files=files, timeout=10)
+        if response.status_code == 200:
+            res_json = response.json()
+            if res_json.get("status") == "success":
+                viewer_url = res_json["data"]["url"]
+                # Convert standard viewer link to direct raw file download link
+                direct_dl_url = viewer_url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
+                return direct_dl_url
+    except Exception:
+        pass
+    return None
+
 # --- ACTION: GENERATE CLICKED ---
 if st.button("Generate Cycle Route", type="primary"):
     if not start_loc or not end_loc:
@@ -116,20 +136,27 @@ if st.button("Generate Cycle Route", type="primary"):
                     gpx_data, coords_list = convert_to_gpx(response.json())
                     
                     if gpx_data and coords_list:
-                        # Create a universal map link using the start/end coordinates
-                        # This avoids large data size limits, and lets you navigate instantly via phone apps
-                        maps_url = f"https://www.google.com/maps/dir/?api=1&origin={start_coords[0]},{start_coords[1]}&destination={end_coords[0]},{end_coords[1]}&travelmode=bicycling"
-                        
-                        # Generate the native QR code image block
-                        qr = segno.make(maps_url)
-                        qr_buffer = BytesIO()
-                        qr.save(qr_buffer, kind='png', scale=5)
-                        qr_bytes = qr_buffer.getvalue()
+                        with st.spinner("Generating direct BikeGPX configuration link..."):
+                            direct_file_url = upload_gpx_for_direct_link(gpx_data)
+                            
+                        if direct_file_url:
+                            # Build the specific import payload URL BikeGPX uses
+                            bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(direct_file_url)}"
+                            
+                            # Encode the complete redirect instruction straight inside the QR code
+                            qr = segno.make(bikegpx_url)
+                            qr_buffer = BytesIO()
+                            qr.save(qr_buffer, kind='png', scale=5)
+                            qr_bytes = qr_buffer.getvalue()
+                        else:
+                            bikegpx_url = None
+                            qr_bytes = None
                         
                         st.session_state.current_route = {
                             "summary_text": f"📍 Route: {start_coords[2]} ➡️ {end_coords[2]}",
                             "coords_df": pd.DataFrame(coords_list),
                             "qr_bytes": qr_bytes,
+                            "bikegpx_url": bikegpx_url,
                             "gpx_raw": gpx_data
                         }
                     else:
@@ -148,13 +175,19 @@ if st.session_state.current_route:
     st.map(route["coords_df"])
     
     # Display the native QR code cleanly in the layout center
-    st.write("---")
-    st.write("### 📲 Scan to Navigate")
-    st.write("Scan this code with your mobile camera to launch the route with turn-by-turn cycling directions immediately:")
-    
-    col_left, col_mid, col_right = st.columns([1, 2, 1])
-    with col_mid:
-        st.image(route["qr_bytes"], width=280)
+    if route["qr_bytes"]:
+        st.write("---")
+        st.write("### 📲 Scan to open in BikeGPX")
+        st.write("Scan this code with your phone's camera to import the route details and load turn-by-turn navigation directly into BikeGPX:")
+        
+        col_left, col_mid, col_right = st.columns([1, 2, 1])
+        with col_mid:
+            st.image(route["qr_bytes"], width=280)
+            
+        st.write("Or if you are on your phone already:")
+        st.link_button("🚀 Open in BikeGPX on this Device", route["bikegpx_url"])
+    else:
+        st.warning("⚠️ Secure link generation failed. Please use manual download below instead.")
         
     st.write("---")
     st.write("### 💾 Backup Local Download")
