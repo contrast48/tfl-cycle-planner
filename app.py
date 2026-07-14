@@ -5,7 +5,6 @@ import json
 import xml.etree.ElementTree as ET
 import pandas as pd
 import time
-import uuid
 import random
 
 st.set_page_config(page_title="TfL Cycle Route to GPX", page_icon="🚲", layout="centered")
@@ -13,22 +12,9 @@ st.set_page_config(page_title="TfL Cycle Route to GPX", page_icon="🚲", layout
 st.title("🚲 TfL Cycle Route to GPX Generator")
 st.write("Plan a route, view it, and send it straight to BikeGPX to scan the QR code!")
 
-# Initialize permanent memory storage slots
-if "gpx_storage" not in st.session_state:
-    st.session_state.gpx_storage = {}
+# Permanent UI memory state
 if "current_route" not in st.session_state:
     st.session_state.current_route = None
-
-# Listen for incoming download requests from BikeGPX
-query_params = st.query_params
-if "get_file" in query_params:
-    file_id = query_params["get_file"]
-    if file_id in st.session_state.gpx_storage:
-        st.text(st.session_state.gpx_storage[file_id])
-        st.stop()
-    else:
-        st.error("File expired or not found.")
-        st.stop()
 
 col1, col2 = st.columns(2)
 with col1:
@@ -45,13 +31,9 @@ bike_proficiency = st.selectbox(
 tfl_key = st.text_input("TfL API Primary Key (Optional)", type="password")
 
 def geocode_location(query):
-    """
-    Attempts to convert input to coordinates.
-    Uses postcodes.io first for UK postcodes (never blocks), falls back to Nominatim with a randomized User-Agent.
-    """
     clean_query = query.strip().replace(" ", "").upper()
     
-    # --- PHASE 1: Quick check if it's a postcode (faster and completely unrestricted) ---
+    # 1. Postcodes.io fast-path
     if len(clean_query) >= 5 and len(clean_query) <= 8:
         postcode_url = f"https://api.postcodes.io/postcodes/{clean_query}"
         try:
@@ -60,18 +42,16 @@ def geocode_location(query):
                 pdata = res.json()["result"]
                 return float(pdata["latitude"]), float(pdata["longitude"]), f"{pdata['postcode']}, London, UK"
         except Exception:
-            pass  # Fallback to main search if postcode API fails
+            pass
 
-    # --- PHASE 2: Nominatim with randomized User-Agent ---
-    # Randomized Agent bypasses static header blocks
+    # 2. OpenStreetMap path
     random_agent = f"tfl_planner_user_{random.randint(100000, 999999)}"
     headers = {"User-Agent": random_agent}
-    
     search_query = f"{query}, London, UK" if "london" not in query.lower() else query
     url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(search_query)}&format=json&limit=1"
     
     try:
-        time.sleep(0.6)  # Safe delay limit
+        time.sleep(0.6)
         response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             results = response.json()
@@ -79,9 +59,9 @@ def geocode_location(query):
                 data = results[0]
                 return float(data["lat"]), float(data["lon"]), data["display_name"]
             else:
-                st.error(f"🔍 No map results found on OpenStreetMap for '{query}'.")
+                st.error(f"🔍 No map results found for '{query}'.")
         else:
-            st.warning(f"⚠️ Map Server returned code {response.status_code} (Probably rate limited).")
+            st.warning(f"⚠️ Map Server returned code {response.status_code}.")
     except Exception as e:
         st.error(f"❌ Geocoding system error: {str(e)}")
     return None
@@ -140,22 +120,28 @@ if st.button("Generate Cycle Route", type="primary"):
                     gpx_data, coords_list = convert_to_gpx(response.json())
                     
                     if gpx_data:
-                        unique_id = str(uuid.uuid4())
-                        st.session_state.gpx_storage[unique_id] = gpx_data
-                        
-                        # Dynamically resolve real public domain via headers
-                        try:
-                            headers = st.context.headers
-                            real_host = headers.get("host", "localhost:8501")
-                            protocol = headers.get("x-forwarded-proto", "http")
-                            file_public_url = f"{protocol}://{real_host}/?get_file={unique_id}"
-                        except Exception:
-                            file_public_url = f"http://localhost:8501/?get_file={unique_id}"
+                        # --- SECURE TEMPORARY EXPORT TRANSIT ---
+                        with st.spinner("Preparing secure link for BikeGPX..."):
+                            try:
+                                # We upload the GPX file anonymously to file.io. It auto-deletes immediately after being downloaded once.
+                                files = {'file': ('route.gpx', gpx_data, 'application/gpx+xml')}
+                                upload_res = requests.post("https://file.io/?expires=1d", files=files, timeout=10)
+                                if upload_res.status_code == 200 and upload_res.json().get("success"):
+                                    direct_gpx_url = upload_res.json().get("link")
+                                else:
+                                    direct_gpx_url = None
+                            except Exception:
+                                direct_gpx_url = None
+
+                        if direct_gpx_url:
+                            bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(direct_gpx_url)}"
+                        else:
+                            bikegpx_url = None
                         
                         st.session_state.current_route = {
                             "summary_text": f"📍 Route: {start_coords[2].split(',')[0]} ➡️ {end_coords[2].split(',')[0]}",
                             "coords_df": pd.DataFrame(coords_list),
-                            "bikegpx_url": f"https://bikegpx.com/?url={urllib.parse.quote(file_public_url)}",
+                            "bikegpx_url": bikegpx_url,
                             "gpx_raw": gpx_data
                         }
                     else:
@@ -174,8 +160,11 @@ if st.session_state.current_route:
     st.map(route["coords_df"])
     
     st.write("### 📲 Export Options")
-    st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", route["bikegpx_url"])
-    
+    if route["bikegpx_url"]:
+        st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", route["bikegpx_url"])
+    else:
+        st.warning("⚠️ Secure transfer setup failed. Please use manual download below instead.")
+        
     st.download_button(
         label="💾 Download GPX File Locally",
         data=route["gpx_raw"],
