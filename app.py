@@ -17,27 +17,22 @@ with col1:
 with col2:
     end_loc = st.text_input("End Location", placeholder="e.g., SW11 4NJ or Battersea Park")
 
-cycle_preference = st.selectbox(
-    "Cycling Preference",
-    options=["all", "easy", "moderate", "fast"],
+# Swapped context to Bike Proficiency as required by TfL's strict data model
+bike_proficiency = st.selectbox(
+    "Route Type / Cycling Pace",
+    options=["easy", "moderate", "fast"],
     format_func=lambda x: x.capitalize()
 )
 
 tfl_key = st.text_input("TfL API Primary Key (Optional)", type="password")
 
 def geocode_location(query):
-    """
-    Converts a postcode or address to latitude, longitude using OpenStreetMap (Free, no key needed).
-    Ensures search is biased towards London, UK.
-    """
     headers = {"User-Agent": "tfl-cycle-route-planner-app"}
-    # Append 'London, UK' to keep results localized if a generic address is typed
     search_query = f"{query}, London, UK" if "london" not in query.lower() else query
     url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(search_query)}&format=json&limit=1"
     
     try:
-        # Respect OSM usage policy (slight delay)
-        time.sleep(0.5) 
+        time.sleep(0.5) # Respect OSM usage guidelines
         response = requests.get(url, headers=headers)
         if response.status_code == 200 and len(response.json()) > 0:
             data = response.json()[0]
@@ -46,18 +41,17 @@ def geocode_location(query):
         st.write(f"Geocoding error: {e}")
     return None
 
-def get_tfl_route_by_coords(start_coords, end_coords, preference, key=None):
-    """
-    Queries TfL using guaranteed coordinates, bypassing the 300 Multiple Choices error.
-    """
+def get_tfl_route_by_coords(start_coords, end_coords, proficiency, key=None):
     start_str = f"{start_coords[0]},{start_coords[1]}"
     end_str = f"{end_coords[0]},{end_coords[1]}"
     
     url = f"https://api.tfl.gov.uk/Journey/JourneyResults/{start_str}/to/{end_str}"
     
+    # FIX: cyclePreference dictates type of cycle trip, bikeProficiency dictates speed/route style
     params = {
         "mode": "cycle",
-        "cyclePreference": preference,
+        "cyclePreference": "AllTheWay", 
+        "bikeProficiency": proficiency
     }
     if key:
         params["app_key"] = key
@@ -107,9 +101,9 @@ if st.button("Generate Cycle Route", type="primary"):
             end_coords = geocode_location(end_loc)
             
         if not start_coords:
-            st.error(f"Could not find coordinates for: '{start_loc}'. Please try a different postcode or station name.")
+            st.error(f"Could not find coordinates for: '{start_loc}'")
         elif not end_coords:
-            st.error(f"Could not find coordinates for: '{end_loc}'. Please try a different postcode or station name.")
+            st.error(f"Could not find coordinates for: '{end_loc}'")
         else:
             st.info(f"📍 Route: {start_coords[2].split(',')[0]} ➡️ {end_coords[2].split(',')[0]}")
             
@@ -117,7 +111,7 @@ if st.button("Generate Cycle Route", type="primary"):
                 response = get_tfl_route_by_coords(
                     (start_coords[0], start_coords[1]), 
                     (end_coords[0], end_coords[1]), 
-                    cycle_preference, 
+                    bike_proficiency, 
                     tfl_key
                 )
                 
