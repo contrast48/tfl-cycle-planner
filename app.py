@@ -4,7 +4,7 @@ import urllib.parse
 import json
 import xml.etree.ElementTree as ET
 import pandas as pd
-import base64
+import time
 
 st.set_page_config(page_title="TfL Cycle Route to GPX", page_icon="🚲", layout="centered")
 
@@ -100,6 +100,32 @@ def convert_to_gpx(journey_data):
     ET.indent(gpx, space="  ", level=0)
     return ET.tostring(gpx, encoding="utf-8", xml_declaration=True).decode("utf-8"), coordinates
 
+def create_anonymous_gist(gpx_content):
+    """
+    Creates an anonymous, public GitHub Gist to securely host the GPX text temporarily.
+    This provides a short, reliable URL for BikeGPX without size/URI limits or rate errors.
+    """
+    url = "https://api.github.com/gists"
+    payload = {
+        "description": "Temporary GPX Route for BikeGPX Navigation",
+        "public": True,
+        "files": {
+            "route.gpx": {
+                "content": gpx_content
+            }
+        }
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=8)
+        if response.status_code == 201:
+            gist_data = response.json()
+            # Extract the raw URL of our route.gpx file inside the gist
+            raw_url = gist_data["files"]["route.gpx"]["raw_url"]
+            return raw_url
+    except Exception as e:
+        st.write(f"Transit creation error: {e}")
+    return None
+
 # --- ACTION: GENERATE CLICKED ---
 if st.button("Generate Cycle Route", type="primary"):
     if not start_loc or not end_loc:
@@ -119,13 +145,14 @@ if st.button("Generate Cycle Route", type="primary"):
                     gpx_data, coords_list = convert_to_gpx(response.json())
                     
                     if gpx_data:
-                        # --- THE DATA-URI METHOD (Bypasses all servers) ---
-                        # Convert raw GPX string to clean base64 data
-                        b64_gpx = base64.b64encode(gpx_data.encode("utf-8")).decode("utf-8")
-                        data_uri = f"data:application/gpx+xml;base64,{b64_gpx}"
+                        # --- SECURE GPX TRANSIT VIA GIST ---
+                        with st.spinner("Preparing short URL transit..."):
+                            gist_raw_url = create_anonymous_gist(gpx_data)
                         
-                        # Generate the BikeGPX transfer Link
-                        bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(data_uri)}"
+                        if gist_raw_url:
+                            bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(gist_raw_url)}"
+                        else:
+                            bikegpx_url = None
                         
                         st.session_state.current_route = {
                             "summary_text": f"📍 Route: {start_coords[2]} ➡️ {end_coords[2]}",
@@ -149,7 +176,10 @@ if st.session_state.current_route:
     st.map(route["coords_df"])
     
     st.write("### 📲 Export Options")
-    st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", route["bikegpx_url"])
+    if route["bikegpx_url"]:
+        st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", route["bikegpx_url"])
+    else:
+        st.warning("⚠️ Transit setup failed. Please use manual download below instead.")
         
     st.download_button(
         label="💾 Download GPX File Locally",
