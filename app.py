@@ -12,7 +12,7 @@ st.set_page_config(page_title="TfL Cycle Route to GPX", page_icon="🚲", layout
 st.title("🚲 TfL Cycle Route to GPX Generator")
 st.write("Plan a route, view it, and send it straight to BikeGPX to scan the QR code!")
 
-# 1. Initialize permanent memory storage slots
+# Initialize permanent memory storage slots
 if "gpx_storage" not in st.session_state:
     st.session_state.gpx_storage = {}
 if "current_route" not in st.session_state:
@@ -108,20 +108,22 @@ if st.button("Generate Cycle Route", type="primary"):
                 gpx_data, coords_list = convert_to_gpx(response.json())
                 
                 if gpx_data:
-                    # Save results cleanly to permanent state cache
                     unique_id = str(uuid.uuid4())
                     st.session_state.gpx_storage[unique_id] = gpx_data
                     
+                    # DYNAMICALLY RESOLVE REAL DOMAIN VIA HEADERS
                     try:
-                        active_sessions = st.runtime.get_instance()._session_mgr.list_active_sessions()
-                        session_info = st.runtime.get_instance()._session_mgr.get_active_session_info(active_sessions[0])
-                        current_host = session_info.request.host
-                        protocol = "https" if "localhost" not in current_host else "http"
-                        file_public_url = f"{protocol}://{current_host}/?get_file={unique_id}"
+                        # Streamlit 1.34+ official context header reading
+                        headers = st.context.headers
+                        real_host = headers.get("host", "localhost:8501")
+                        
+                        # Streamlit Cloud handles the SSL handshake and sets this header
+                        protocol = headers.get("x-forwarded-proto", "http")
+                        
+                        file_public_url = f"{protocol}://{real_host}/?get_file={unique_id}"
                     except Exception:
                         file_public_url = f"http://localhost:8501/?get_file={unique_id}"
                     
-                    # Store everything required to render UI inside the session dictionary
                     st.session_state.current_route = {
                         "summary_text": f"📍 Route: {start_coords[2].split(',')[0]} ➡️ {end_coords[2].split(',')[0]}",
                         "coords_df": pd.DataFrame(coords_list),
@@ -136,7 +138,6 @@ if st.button("Generate Cycle Route", type="primary"):
             st.error("Could not trace one or both of those addresses.")
 
 # --- RENDER UI FROM CACHE MEMORY ---
-# This ensures that even when export triggers a reload, the map and buttons stay visible!
 if st.session_state.current_route:
     route = st.session_state.current_route
     
