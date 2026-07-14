@@ -4,12 +4,13 @@ import urllib.parse
 import json
 import xml.etree.ElementTree as ET
 import pandas as pd
-import time
+import segno
+from io import BytesIO
 
-st.set_page_config(page_title="TfL Cycle Route to GPX", page_icon="🚲", layout="centered")
+st.set_page_config(page_title="TfL Cycle Route Planner", page_icon="🚲", layout="centered")
 
-st.title("🚲 TfL Cycle Route to GPX Generator")
-st.write("Plan a route, view it, and send it straight to BikeGPX to scan the QR code!")
+st.title("🚲 TfL Cycle Route to Phone Generator")
+st.write("Plan a route, view it, and scan the QR code to open it directly on your phone!")
 
 # Permanent UI memory state
 if "current_route" not in st.session_state:
@@ -30,14 +31,9 @@ bike_proficiency = st.selectbox(
 tfl_key = st.text_input("TfL API Primary Key (Optional)", type="password")
 
 def geocode_location(query, key=None):
-    """
-    Robust hybrid geocoding system:
-    1. postcodes.io for perfect UK postcodes.
-    2. TfL native search for London landmarks/stations.
-    """
     clean_query = query.strip().replace(" ", "").upper()
     
-    # 1. Check if it looks like a postcode
+    # 1. Check if it looks like a postcode (postcodes.io)
     if len(clean_query) >= 5 and len(clean_query) <= 8:
         postcode_url = f"https://api.postcodes.io/postcodes/{clean_query}"
         try:
@@ -48,7 +44,7 @@ def geocode_location(query, key=None):
         except Exception:
             pass
 
-    # 2. TfL Native Place Search (extremely fast & robust fallback)
+    # 2. TfL Native Place Search (landmarks, stations, streets)
     tfl_search_url = "https://api.tfl.gov.uk/Place/Search"
     params = {"name": query}
     if key:
@@ -101,27 +97,6 @@ def convert_to_gpx(journey_data):
     ET.indent(gpx, space="  ", level=0)
     return ET.tostring(gpx, encoding="utf-8", xml_declaration=True).decode("utf-8"), coordinates
 
-def create_temporary_paste(gpx_content):
-    """
-    Creates a temporary public paste on dpaste.org (expires in 1 hour).
-    Extremely reliable, zero auth, avoids URL length limits.
-    """
-    url = "https://dpaste.org/api/"
-    data = {
-        "content": gpx_content,
-        "expires": "3600",  # Expire after 1 hour (3600 seconds)
-        "format": "url"     # Returns the direct URL string
-    }
-    try:
-        response = requests.post(url, data=data, timeout=8)
-        if response.status_code == 200:
-            paste_url = response.text.strip().replace('"', '')
-            # dpaste serves raw text by adding /raw to the link
-            return f"{paste_url}/raw"
-    except Exception:
-        pass
-    return None
-
 # --- ACTION: GENERATE CLICKED ---
 if st.button("Generate Cycle Route", type="primary"):
     if not start_loc or not end_loc:
@@ -140,28 +115,29 @@ if st.button("Generate Cycle Route", type="primary"):
                 if response.status_code == 200:
                     gpx_data, coords_list = convert_to_gpx(response.json())
                     
-                    if gpx_data:
-                        # --- SECURE TEMPORARY TRANSIT VIA DPASTE ---
-                        with st.spinner("Creating secure short transit link..."):
-                            raw_paste_url = create_temporary_paste(gpx_data)
+                    if gpx_data and coords_list:
+                        # Create a universal map link using the start/end coordinates
+                        # This avoids large data size limits, and lets you navigate instantly via phone apps
+                        maps_url = f"https://www.google.com/maps/dir/?api=1&origin={start_coords[0]},{start_coords[1]}&destination={end_coords[0]},{end_coords[1]}&travelmode=bicycling"
                         
-                        if raw_paste_url:
-                            bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(raw_paste_url)}"
-                        else:
-                            bikegpx_url = None
+                        # Generate the native QR code image block
+                        qr = segno.make(maps_url)
+                        qr_buffer = BytesIO()
+                        qr.save(qr_buffer, kind='png', scale=5)
+                        qr_bytes = qr_buffer.getvalue()
                         
                         st.session_state.current_route = {
                             "summary_text": f"📍 Route: {start_coords[2]} ➡️ {end_coords[2]}",
                             "coords_df": pd.DataFrame(coords_list),
-                            "bikegpx_url": bikegpx_url,
+                            "qr_bytes": qr_bytes,
                             "gpx_raw": gpx_data
                         }
                     else:
-                        st.error("Could not parse coordinates structure.")
+                        st.error("Could not parse coordinate tracking matrices.")
                 else:
                     st.error("TfL couldn't map a cycling path between those locations.")
         else:
-            st.error("Could not trace one or both of those locations. Try checking spelling or using a postcode.")
+            st.error("Could not trace one or both of those locations.")
 
 # --- RENDER UI FROM CACHE MEMORY ---
 if st.session_state.current_route:
@@ -171,14 +147,19 @@ if st.session_state.current_route:
     st.success("Route generated successfully!")
     st.map(route["coords_df"])
     
-    st.write("### 📲 Export Options")
-    if route["bikegpx_url"]:
-        st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", route["bikegpx_url"])
-    else:
-        st.warning("⚠️ Transit setup failed. Please use manual download below instead.")
+    # Display the native QR code cleanly in the layout center
+    st.write("---")
+    st.write("### 📲 Scan to Navigate")
+    st.write("Scan this code with your mobile camera to launch the route with turn-by-turn cycling directions immediately:")
+    
+    col_left, col_mid, col_right = st.columns([1, 2, 1])
+    with col_mid:
+        st.image(route["qr_bytes"], width=280)
         
+    st.write("---")
+    st.write("### 💾 Backup Local Download")
     st.download_button(
-        label="💾 Download GPX File Locally",
+        label="Download Raw GPX File",
         data=route["gpx_raw"],
         file_name="tfl_cycle_route.gpx",
         mime="application/gpx+xml"
