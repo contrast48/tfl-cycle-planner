@@ -12,16 +12,17 @@ st.set_page_config(page_title="TfL Cycle Route to GPX", page_icon="🚲", layout
 st.title("🚲 TfL Cycle Route to GPX Generator")
 st.write("Plan a route, view it, and send it straight to BikeGPX to scan the QR code!")
 
-# Initialize session state to hold temporary live GPX paths
+# 1. Initialize permanent memory storage slots
 if "gpx_storage" not in st.session_state:
     st.session_state.gpx_storage = {}
+if "current_route" not in st.session_state:
+    st.session_state.current_route = None
 
 # Listen for incoming download requests from BikeGPX
 query_params = st.query_params
 if "get_file" in query_params:
     file_id = query_params["get_file"]
     if file_id in st.session_state.gpx_storage:
-        # Serve the raw GPX XML string directly to BikeGPX
         st.text(st.session_state.gpx_storage[file_id])
         st.stop()
     else:
@@ -91,58 +92,64 @@ def convert_to_gpx(journey_data):
     ET.indent(gpx, space="  ", level=0)
     return ET.tostring(gpx, encoding="utf-8", xml_declaration=True).decode("utf-8"), coordinates
 
+# --- ACTION: GENERATE CLICKED ---
 if st.button("Generate Cycle Route", type="primary"):
     if not start_loc or not end_loc:
         st.error("Please enter both locations.")
     else:
-        with st.spinner("Finding coordinates..."):
+        with st.spinner("Calculating route details..."):
             start_coords = geocode_location(start_loc)
             end_coords = geocode_location(end_loc)
             
         if start_coords and end_coords:
-            st.info(f"📍 Route: {start_coords[2].split(',')[0]} ➡️ {end_coords[2].split(',')[0]}")
+            response = get_tfl_route_by_coords((start_coords[0], start_coords[1]), (end_coords[0], end_coords[1]), bike_proficiency, tfl_key)
             
-            with st.spinner("Fetching route from TfL..."):
-                response = get_tfl_route_by_coords((start_coords[0], start_coords[1]), (end_coords[0], end_coords[1]), bike_proficiency, tfl_key)
+            if response.status_code == 200:
+                gpx_data, coords_list = convert_to_gpx(response.json())
                 
-                if response.status_code == 200:
-                    gpx_data, coords_list = convert_to_gpx(response.json())
+                if gpx_data:
+                    # Save results cleanly to permanent state cache
+                    unique_id = str(uuid.uuid4())
+                    st.session_state.gpx_storage[unique_id] = gpx_data
                     
-                    if gpx_data:
-                        st.success("Route generated successfully!")
-                        st.map(pd.DataFrame(coords_list))
-                        
-                        # Generate unique file identifier
-                        unique_id = str(uuid.uuid4())
-                        st.session_state.gpx_storage[unique_id] = gpx_data
-                        
-                        # DYNAMICALLY RESOLVE CURRENT PUBLIC DOMAIN
-                        try:
-                            # Pull active session context headers
-                            active_sessions = st.runtime.get_instance()._session_mgr.list_active_sessions()
-                            session_info = st.runtime.get_instance()._session_mgr.get_active_session_info(active_sessions[0])
-                            current_host = session_info.request.host
-                            
-                            # Safely check if we are on HTTP or HTTPS
-                            protocol = "https" if "localhost" not in current_host else "http"
-                            file_public_url = f"{protocol}://{current_host}/?get_file={unique_id}"
-                        except Exception:
-                            # Ultimate structural fallback if runtime inspection fails
-                            file_public_url = f"http://localhost:8501/?get_file={unique_id}"
-                        
-                        # Build out the BikeGPX deep link
-                        bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(file_public_url)}"
-                        
-                        st.write("### 📲 Export Options")
-                        st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", bikegpx_url)
-                        
-                        st.download_button(
-                            label="💾 Download GPX File Locally",
-                            data=gpx_data,
-                            file_name="tfl_cycle_route.gpx",
-                            mime="application/gpx+xml"
-                        )
-                    else:
-                        st.error("Could not trace path mapping structures.")
+                    try:
+                        active_sessions = st.runtime.get_instance()._session_mgr.list_active_sessions()
+                        session_info = st.runtime.get_instance()._session_mgr.get_active_session_info(active_sessions[0])
+                        current_host = session_info.request.host
+                        protocol = "https" if "localhost" not in current_host else "http"
+                        file_public_url = f"{protocol}://{current_host}/?get_file={unique_id}"
+                    except Exception:
+                        file_public_url = f"http://localhost:8501/?get_file={unique_id}"
+                    
+                    # Store everything required to render UI inside the session dictionary
+                    st.session_state.current_route = {
+                        "summary_text": f"📍 Route: {start_coords[2].split(',')[0]} ➡️ {end_coords[2].split(',')[0]}",
+                        "coords_df": pd.DataFrame(coords_list),
+                        "bikegpx_url": f"https://bikegpx.com/?url={urllib.parse.quote(file_public_url)}",
+                        "gpx_raw": gpx_data
+                    }
                 else:
-                    st.error("TfL couldn't map a cycling path here.")
+                    st.error("Could not parse coordinates structure.")
+            else:
+                st.error("TfL couldn't map a cycling path between those locations.")
+        else:
+            st.error("Could not trace one or both of those addresses.")
+
+# --- RENDER UI FROM CACHE MEMORY ---
+# This ensures that even when export triggers a reload, the map and buttons stay visible!
+if st.session_state.current_route:
+    route = st.session_state.current_route
+    
+    st.info(route["summary_text"])
+    st.success("Route generated successfully!")
+    st.map(route["coords_df"])
+    
+    st.write("### 📲 Export Options")
+    st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", route["bikegpx_url"])
+    
+    st.download_button(
+        label="💾 Download GPX File Locally",
+        data=route["gpx_raw"],
+        file_name="tfl_cycle_route.gpx",
+        mime="application/gpx+xml"
+    )
