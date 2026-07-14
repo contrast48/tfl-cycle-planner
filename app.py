@@ -4,13 +4,11 @@ import urllib.parse
 import json
 import xml.etree.ElementTree as ET
 import pandas as pd
-import segno
-from io import BytesIO
 
 st.set_page_config(page_title="TfL Cycle Route Planner", page_icon="🚲", layout="centered")
 
 st.title("🚲 TfL Cycle Route to BikeGPX Generator")
-st.write("Plan a route, view it, and scan the QR code to open the route directly in BikeGPX!")
+st.write("Plan a route, view it, and download your GPX route for free turn-by-turn navigation!")
 
 # Permanent UI memory state
 if "current_route" not in st.session_state:
@@ -31,9 +29,14 @@ bike_proficiency = st.selectbox(
 tfl_key = st.text_input("TfL API Primary Key (Optional)", type="password")
 
 def geocode_location(query, key=None):
+    """
+    Robust hybrid geocoding system:
+    1. postcodes.io for perfect UK postcodes.
+    2. TfL native search for London landmarks/stations.
+    """
     clean_query = query.strip().replace(" ", "").upper()
     
-    # 1. Postcode search
+    # 1. Check if it looks like a postcode
     if len(clean_query) >= 5 and len(clean_query) <= 8:
         postcode_url = f"https://api.postcodes.io/postcodes/{clean_query}"
         try:
@@ -44,7 +47,7 @@ def geocode_location(query, key=None):
         except Exception:
             pass
 
-    # 2. TfL Location Search
+    # 2. TfL Native Place Search (landmarks, stations, streets)
     tfl_search_url = "https://api.tfl.gov.uk/Place/Search"
     params = {"name": query}
     if key:
@@ -97,46 +100,6 @@ def convert_to_gpx(journey_data):
     ET.indent(gpx, space="  ", level=0)
     return ET.tostring(gpx, encoding="utf-8", xml_declaration=True).decode("utf-8"), coordinates
 
-def upload_gpx_with_fallbacks(gpx_content):
-    """
-    Attempts to host the GPX using multiple fallback routes to ensure 100% uptime.
-    Strictly validates that returned values are valid URLs and not HTML error pages.
-    """
-    # Fallback 1: ttm.sh (raw direct file host)
-    try:
-        response = requests.post(
-            "https://ttm.sh", 
-            files={"file": ("route.gpx", gpx_content, "application/gpx+xml")}, 
-            timeout=7
-        )
-        if response.status_code == 200:
-            url = response.text.strip()
-            # Verify the response is a clean URL and doesn't contain HTML error tags
-            if url.startswith("http") and not any(x in url.lower() for x in ["<html", "cloudflare", "error"]):
-                return url
-    except Exception:
-        pass
-
-    # Fallback 2: tmpfiles.org (as backup)
-    try:
-        response = requests.post(
-            "https://tmpfiles.org/api/v1/upload", 
-            files={"file": ("route.gpx", gpx_content, "application/gpx+xml")}, 
-            timeout=7
-        )
-        if response.status_code == 200:
-            res_json = response.json()
-            if res_json.get("status") == "success":
-                viewer_url = res_json["data"]["url"]
-                direct_url = viewer_url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
-                # Add fake query parameter to trick BikeGPX file filters
-                tricked_url = f"{direct_url}?file=route.gpx"
-                return tricked_url
-    except Exception:
-        pass
-
-    return None
-
 # --- ACTION: GENERATE CLICKED ---
 if st.button("Generate Cycle Route", type="primary"):
     if not start_loc or not end_loc:
@@ -156,29 +119,9 @@ if st.button("Generate Cycle Route", type="primary"):
                     gpx_data, coords_list = convert_to_gpx(response.json())
                     
                     if gpx_data and coords_list:
-                        with st.spinner("Creating direct BikeGPX configuration link..."):
-                            direct_file_url = upload_gpx_with_fallbacks(gpx_data)
-                            
-                        bikegpx_url = None
-                        qr_bytes = None
-                        
-                        if direct_file_url:
-                            bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(direct_file_url)}"
-                            
-                            # Safely attempt to build QR code
-                            try:
-                                qr = segno.make(bikegpx_url)
-                                qr_buffer = BytesIO()
-                                qr.save(qr_buffer, kind='png', scale=5)
-                                qr_bytes = qr_buffer.getvalue()
-                            except Exception as qr_err:
-                                st.error(f"Failed to generate QR Code safely: {qr_err}")
-                        
                         st.session_state.current_route = {
                             "summary_text": f"📍 Route: {start_coords[2]} ➡️ {end_coords[2]}",
                             "coords_df": pd.DataFrame(coords_list),
-                            "qr_bytes": qr_bytes,
-                            "bikegpx_url": bikegpx_url,
                             "gpx_raw": gpx_data
                         }
                     else:
@@ -196,26 +139,35 @@ if st.session_state.current_route:
     st.success("Route generated successfully!")
     st.map(route["coords_df"])
     
-    # Display the native QR code cleanly in the layout center
-    if route["qr_bytes"]:
-        st.write("---")
-        st.write("### 📲 Scan to open in BikeGPX")
-        st.write("Scan this code with your phone's camera to import the route details and load turn-by-turn navigation directly into BikeGPX:")
-        
-        col_left, col_mid, col_right = st.columns([1, 2, 1])
-        with col_mid:
-            st.image(route["qr_bytes"], width=280)
-            
-        st.write("Or if you are on your phone already:")
-        st.link_button("🚀 Open in BikeGPX on this Device", route["bikegpx_url"])
-    else:
-        st.warning("⚠️ All secure cloud transit services are currently offline or rate-limiting our hosting server. Please download the GPX file locally below and import it manually into BikeGPX.")
-        
     st.write("---")
-    st.write("### 💾 Backup Local Download")
+    st.write("### 📲 How to open this route in BikeGPX")
+    
+    # 1. Download GPX Locally
+    st.write("**Step 1:** Download the GPX route file to your device:")
     st.download_button(
-        label="Download Raw GPX File",
+        label="💾 Download GPX File",
         data=route["gpx_raw"],
         file_name="tfl_cycle_route.gpx",
         mime="application/gpx+xml"
     )
+    
+    # 2. Upload / Import guide
+    st.write("**Step 2:** Choose your import method:")
+    
+    tab1, tab2 = st.tabs(["💻 Desktop Upload", "📱 Mobile App Import"])
+    
+    with tab1:
+        st.write("If you are on a computer:")
+        st.write("1. Open [bikegpx.com](https://bikegpx.com) in your browser.")
+        st.write("2. Drag and drop your downloaded `tfl_cycle_route.gpx` file onto their page.")
+        st.write("3. Scan the generated QR code using your phone's camera.")
+        
+    with tab2:
+        st.write("If you are on your phone:")
+        st.write("1. Open the **BikeGPX** app.")
+        st.write("2. Tap **Select Route** ➡️ **Add Route** ➡️ **Import File**.")
+        st.write("3. Select your downloaded `tfl_cycle_route.gpx` file from your device downloads folder.")
+
+    # 3. Code preview for quick reference
+    with st.expander("📝 View Raw GPX Text"):
+        st.code(route["gpx_raw"], language="xml")
