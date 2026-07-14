@@ -16,18 +16,19 @@ st.write("Plan a route, view it, and send it straight to BikeGPX to scan the QR 
 if "gpx_storage" not in st.session_state:
     st.session_state.gpx_storage = {}
 
-# Streamlit allows us to catch custom URL parameters. We can use this to host the file publicly!
+# Listen for incoming download requests from BikeGPX
 query_params = st.query_params
 if "get_file" in query_params:
     file_id = query_params["get_file"]
     if file_id in st.session_state.gpx_storage:
+        # Serve the raw GPX XML string directly to BikeGPX
         st.text(st.session_state.gpx_storage[file_id])
         st.stop()
     else:
         st.error("File expired or not found.")
         st.stop()
 
-col1, col2 = col1, col2 = st.columns(2)
+col1, col2 = st.columns(2)
 with col1:
     start_loc = st.text_input("Start Location", placeholder="e.g., WC1B 3DG")
 with col2:
@@ -51,7 +52,7 @@ def geocode_location(query):
         if response.status_code == 200 and len(response.json()) > 0:
             data = response.json()[0]
             return float(data["lat"]), float(data["lon"]), data["display_name"]
-    except Exception as e:
+    except Exception:
         pass
     return None
 
@@ -111,29 +112,28 @@ if st.button("Generate Cycle Route", type="primary"):
                         st.success("Route generated successfully!")
                         st.map(pd.DataFrame(coords_list))
                         
-                        # --- THE BIKEGPX MAGIC LINK TRICK ---
-                        # 1. Generate a unique ID for this route file
+                        # Generate unique file identifier
                         unique_id = str(uuid.uuid4())
-                        # 2. Store the string in session state memory
                         st.session_state.gpx_storage[unique_id] = gpx_data
                         
-                        # 3. Construct a live URL pointing right back into this app instance
-                        # Note: context parameters let us read what our web host URL is dynamically
-                        base_url = "https://tfl-cycle-planner.streamlit.app" # Default fallback placeholder
+                        # DYNAMICALLY RESOLVE CURRENT PUBLIC DOMAIN
                         try:
-                            # Tries to construct live production url dynamically 
-                            from streamlit.web.server.server import Server
-                            # If hosted, we append our custom endpoint query string
-                            file_public_url = f"https://{st.runtime.get_instance()._get_cookie_manager()._headers.get('Host')}/?get_file={unique_id}"
-                        except:
+                            # Pull active session context headers
+                            active_sessions = st.runtime.get_instance()._session_mgr.list_active_sessions()
+                            session_info = st.runtime.get_instance()._session_mgr.get_active_session_info(active_sessions[0])
+                            current_host = session_info.request.host
+                            
+                            # Safely check if we are on HTTP or HTTPS
+                            protocol = "https" if "localhost" not in current_host else "http"
+                            file_public_url = f"{protocol}://{current_host}/?get_file={unique_id}"
+                        except Exception:
+                            # Ultimate structural fallback if runtime inspection fails
                             file_public_url = f"http://localhost:8501/?get_file={unique_id}"
                         
-                        # 4. Construct BikeGPX pre-fill deep link URL
+                        # Build out the BikeGPX deep link
                         bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(file_public_url)}"
                         
-                        # Show action buttons
                         st.write("### 📲 Export Options")
-                        
                         st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", bikegpx_url)
                         
                         st.download_button(
