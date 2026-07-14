@@ -10,7 +10,7 @@ from io import BytesIO
 st.set_page_config(page_title="TfL Cycle Route Planner", page_icon="🚲", layout="centered")
 
 st.title("🚲 TfL Cycle Route to BikeGPX Generator")
-st.write("Plan a route, view it, and scan the QR code to open it directly in BikeGPX on your phone!")
+st.write("Plan a route, view it, and scan the QR code to open the route directly in BikeGPX!")
 
 # Permanent UI memory state
 if "current_route" not in st.session_state:
@@ -33,7 +33,7 @@ tfl_key = st.text_input("TfL API Primary Key (Optional)", type="password")
 def geocode_location(query, key=None):
     clean_query = query.strip().replace(" ", "").upper()
     
-    # 1. Check if it looks like a postcode (postcodes.io)
+    # 1. Postcode search
     if len(clean_query) >= 5 and len(clean_query) <= 8:
         postcode_url = f"https://api.postcodes.io/postcodes/{clean_query}"
         try:
@@ -44,7 +44,7 @@ def geocode_location(query, key=None):
         except Exception:
             pass
 
-    # 2. TfL Native Place Search (landmarks, stations, streets)
+    # 2. TfL Location Search
     tfl_search_url = "https://api.tfl.gov.uk/Place/Search"
     params = {"name": query}
     if key:
@@ -97,22 +97,31 @@ def convert_to_gpx(journey_data):
     ET.indent(gpx, space="  ", level=0)
     return ET.tostring(gpx, encoding="utf-8", xml_declaration=True).decode("utf-8"), coordinates
 
-def upload_gpx_for_direct_link(gpx_content):
+def upload_gpx_and_get_short_link(gpx_content):
     """
-    Uploads the GPX raw content anonymously to tmpfiles.org and gets a direct /dl/ link.
-    Bypasses standard proxy, CORS, and auth rate limits.
+    1. Uploads file to tmpfiles.org.
+    2. Modifies link to make it a direct download link.
+    3. Traces it with a clean .gpx extension to bypass BikeGPX's strict string filter.
+    4. Shortens via TinyURL.
     """
-    url = "https://tmpfiles.org/api/v1/upload"
-    files = {"file": ("tfl_cycle_route.gpx", gpx_content, "application/gpx+xml")}
+    upload_url = "https://tmpfiles.org/api/v1/upload"
+    files = {"file": ("route.gpx", gpx_content, "application/gpx+xml")}
     try:
-        response = requests.post(url, files=files, timeout=10)
+        response = requests.post(upload_url, files=files, timeout=10)
         if response.status_code == 200:
             res_json = response.json()
             if res_json.get("status") == "success":
                 viewer_url = res_json["data"]["url"]
-                # Convert standard viewer link to direct raw file download link
+                # Convert standard viewer URL to direct raw download URL
                 direct_dl_url = viewer_url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
-                return direct_dl_url
+                
+                # Trick BikeGPX into seeing a .gpx extension by appending a harmless query string parameter
+                tricked_url = f"{direct_dl_url}?file=route.gpx"
+                
+                # Shorten via TinyURL API so URL character limits are never violated
+                tiny_api = f"http://tinyurl.com/api-create.php?url={urllib.parse.quote(tricked_url)}"
+                short_url = requests.get(tiny_api, timeout=5).text.strip()
+                return short_url
     except Exception:
         pass
     return None
@@ -136,11 +145,11 @@ if st.button("Generate Cycle Route", type="primary"):
                     gpx_data, coords_list = convert_to_gpx(response.json())
                     
                     if gpx_data and coords_list:
-                        with st.spinner("Generating direct BikeGPX configuration link..."):
-                            direct_file_url = upload_gpx_for_direct_link(gpx_data)
+                        with st.spinner("Creating direct BikeGPX configuration link..."):
+                            direct_file_url = upload_gpx_and_get_short_link(gpx_data)
                             
                         if direct_file_url:
-                            # Build the specific import payload URL BikeGPX uses
+                            # Build the correct parameters BikeGPX uses to parse external URLs
                             bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(direct_file_url)}"
                             
                             # Encode the complete redirect instruction straight inside the QR code
