@@ -97,31 +97,18 @@ def convert_to_gpx(journey_data):
     ET.indent(gpx, space="  ", level=0)
     return ET.tostring(gpx, encoding="utf-8", xml_declaration=True).decode("utf-8"), coordinates
 
-def upload_gpx_and_get_short_link(gpx_content):
+def upload_gpx_to_ttm(gpx_content):
     """
-    1. Uploads file to tmpfiles.org.
-    2. Modifies link to make it a direct download link.
-    3. Traces it with a clean .gpx extension to bypass BikeGPX's strict string filter.
-    4. Shortens via TinyURL.
+    Uploads the GPX file directly to ttm.sh.
+    This service returns a completely direct, un-redirected file URL with a clean .gpx extension.
     """
-    upload_url = "https://tmpfiles.org/api/v1/upload"
+    upload_url = "https://ttm.sh"
     files = {"file": ("route.gpx", gpx_content, "application/gpx+xml")}
     try:
         response = requests.post(upload_url, files=files, timeout=10)
         if response.status_code == 200:
-            res_json = response.json()
-            if res_json.get("status") == "success":
-                viewer_url = res_json["data"]["url"]
-                # Convert standard viewer URL to direct raw download URL
-                direct_dl_url = viewer_url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
-                
-                # Trick BikeGPX into seeing a .gpx extension by appending a harmless query string parameter
-                tricked_url = f"{direct_dl_url}?file=route.gpx"
-                
-                # Shorten via TinyURL API so URL character limits are never violated
-                tiny_api = f"http://tinyurl.com/api-create.php?url={urllib.parse.quote(tricked_url)}"
-                short_url = requests.get(tiny_api, timeout=5).text.strip()
-                return short_url
+            direct_gpx_url = response.text.strip()
+            return direct_gpx_url
     except Exception:
         pass
     return None
@@ -146,13 +133,13 @@ if st.button("Generate Cycle Route", type="primary"):
                     
                     if gpx_data and coords_list:
                         with st.spinner("Creating direct BikeGPX configuration link..."):
-                            direct_file_url = upload_gpx_and_get_short_link(gpx_data)
+                            direct_file_url = upload_gpx_to_ttm(gpx_data)
                             
                         if direct_file_url:
-                            # Build the correct parameters BikeGPX uses to parse external URLs
+                            # Build out direct path mapping for BikeGPX
                             bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(direct_file_url)}"
                             
-                            # Encode the complete redirect instruction straight inside the QR code
+                            # Create clean QR image containing the destination
                             qr = segno.make(bikegpx_url)
                             qr_buffer = BytesIO()
                             qr.save(qr_buffer, kind='png', scale=5)
