@@ -30,38 +30,39 @@ bike_proficiency = st.selectbox(
 tfl_key = st.text_input("TfL API Primary Key (Optional)", type="password")
 
 def geocode_location(query, key=None):
+    """
+    Robust hybrid geocoding system:
+    1. postcodes.io for perfect UK postcodes.
+    2. TfL native search for London landmarks/stations.
+    """
     clean_query = query.strip().replace(" ", "").upper()
     
-    # 1. Check if it's a postcode (postcodes.io)
+    # 1. Check if it looks like a postcode
     if len(clean_query) >= 5 and len(clean_query) <= 8:
         postcode_url = f"https://api.postcodes.io/postcodes/{clean_query}"
         try:
-            res = requests.get(postcode_url, timeout=5)
+            res = requests.get(postcode_url, timeout=4)
             if res.status_code == 200:
                 pdata = res.json()["result"]
                 return float(pdata["latitude"]), float(pdata["longitude"]), f"{pdata['postcode']}, London"
         except Exception:
             pass
 
-    # 2. Use TfL's native Place Search
+    # 2. TfL Native Place Search (extremely fast & robust fallback)
     tfl_search_url = "https://api.tfl.gov.uk/Place/Search"
     params = {"name": query}
     if key:
         params["app_key"] = key
         
     try:
-        response = requests.get(tfl_search_url, params=params, timeout=8)
+        response = requests.get(tfl_search_url, params=params, timeout=5)
         if response.status_code == 200:
             results = response.json()
             if len(results) > 0:
                 match = results[0]
                 return float(match["lat"]), float(match["lon"]), match.get("name", query)
-            else:
-                st.error(f"🔍 TfL could not find any locations matching '{query}'.")
-        else:
-            st.error(f"❌ TfL Location Search failed (Code {response.status_code}).")
-    except Exception as e:
-        st.error(f"❌ Geocoding system error: {str(e)}")
+    except Exception:
+        pass
         
     return None
 
@@ -100,30 +101,25 @@ def convert_to_gpx(journey_data):
     ET.indent(gpx, space="  ", level=0)
     return ET.tostring(gpx, encoding="utf-8", xml_declaration=True).decode("utf-8"), coordinates
 
-def create_anonymous_gist(gpx_content):
+def create_temporary_paste(gpx_content):
     """
-    Creates an anonymous, public GitHub Gist to securely host the GPX text temporarily.
-    This provides a short, reliable URL for BikeGPX without size/URI limits or rate errors.
+    Creates a temporary public paste on dpaste.org (expires in 1 hour).
+    Extremely reliable, zero auth, avoids URL length limits.
     """
-    url = "https://api.github.com/gists"
-    payload = {
-        "description": "Temporary GPX Route for BikeGPX Navigation",
-        "public": True,
-        "files": {
-            "route.gpx": {
-                "content": gpx_content
-            }
-        }
+    url = "https://dpaste.org/api/"
+    data = {
+        "content": gpx_content,
+        "expires": "3600",  # Expire after 1 hour (3600 seconds)
+        "format": "url"     # Returns the direct URL string
     }
     try:
-        response = requests.post(url, json=payload, timeout=8)
-        if response.status_code == 201:
-            gist_data = response.json()
-            # Extract the raw URL of our route.gpx file inside the gist
-            raw_url = gist_data["files"]["route.gpx"]["raw_url"]
-            return raw_url
-    except Exception as e:
-        st.write(f"Transit creation error: {e}")
+        response = requests.post(url, data=data, timeout=8)
+        if response.status_code == 200:
+            paste_url = response.text.strip().replace('"', '')
+            # dpaste serves raw text by adding /raw to the link
+            return f"{paste_url}/raw"
+    except Exception:
+        pass
     return None
 
 # --- ACTION: GENERATE CLICKED ---
@@ -145,12 +141,12 @@ if st.button("Generate Cycle Route", type="primary"):
                     gpx_data, coords_list = convert_to_gpx(response.json())
                     
                     if gpx_data:
-                        # --- SECURE GPX TRANSIT VIA GIST ---
-                        with st.spinner("Preparing short URL transit..."):
-                            gist_raw_url = create_anonymous_gist(gpx_data)
+                        # --- SECURE TEMPORARY TRANSIT VIA DPASTE ---
+                        with st.spinner("Creating secure short transit link..."):
+                            raw_paste_url = create_temporary_paste(gpx_data)
                         
-                        if gist_raw_url:
-                            bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(gist_raw_url)}"
+                        if raw_paste_url:
+                            bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(raw_paste_url)}"
                         else:
                             bikegpx_url = None
                         
@@ -165,7 +161,7 @@ if st.button("Generate Cycle Route", type="primary"):
                 else:
                     st.error("TfL couldn't map a cycling path between those locations.")
         else:
-            st.error("Could not trace one or both of those locations.")
+            st.error("Could not trace one or both of those locations. Try checking spelling or using a postcode.")
 
 # --- RENDER UI FROM CACHE MEMORY ---
 if st.session_state.current_route:
