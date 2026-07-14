@@ -4,8 +4,7 @@ import urllib.parse
 import json
 import xml.etree.ElementTree as ET
 import pandas as pd
-import time
-import uuid
+import base64
 
 st.set_page_config(page_title="TfL Cycle Route to GPX", page_icon="🚲", layout="centered")
 
@@ -31,14 +30,9 @@ bike_proficiency = st.selectbox(
 tfl_key = st.text_input("TfL API Primary Key (Optional)", type="password")
 
 def geocode_location(query, key=None):
-    """
-    Resolves locations safely without using Nominatim/OpenStreetMap to avoid 429 rate limits.
-    1. Uses postcodes.io for UK postcodes (highly reliable, no limits).
-    2. Uses TfL's native Place Search API for London landmarks, stations, and addresses.
-    """
     clean_query = query.strip().replace(" ", "").upper()
     
-    # --- Step 1: Check if it's a postcode (postcodes.io) ---
+    # 1. Check if it's a postcode (postcodes.io)
     if len(clean_query) >= 5 and len(clean_query) <= 8:
         postcode_url = f"https://api.postcodes.io/postcodes/{clean_query}"
         try:
@@ -49,7 +43,7 @@ def geocode_location(query, key=None):
         except Exception:
             pass
 
-    # --- Step 2: Use TfL's native Place Search (Free, highly optimized for London, never blocks) ---
+    # 2. Use TfL's native Place Search
     tfl_search_url = "https://api.tfl.gov.uk/Place/Search"
     params = {"name": query}
     if key:
@@ -60,7 +54,6 @@ def geocode_location(query, key=None):
         if response.status_code == 200:
             results = response.json()
             if len(results) > 0:
-                # Grab the first matched result from TfL's database
                 match = results[0]
                 return float(match["lat"]), float(match["lon"]), match.get("name", query)
             else:
@@ -126,22 +119,13 @@ if st.button("Generate Cycle Route", type="primary"):
                     gpx_data, coords_list = convert_to_gpx(response.json())
                     
                     if gpx_data:
-                        # --- SECURE TEMPORARY EXPORT TRANSIT ---
-                        with st.spinner("Preparing secure link for BikeGPX..."):
-                            try:
-                                files = {'file': ('route.gpx', gpx_data, 'application/gpx+xml')}
-                                upload_res = requests.post("https://file.io/?expires=1d", files=files, timeout=10)
-                                if upload_res.status_code == 200 and upload_res.json().get("success"):
-                                    direct_gpx_url = upload_res.json().get("link")
-                                else:
-                                    direct_gpx_url = None
-                            except Exception:
-                                direct_gpx_url = None
-
-                        if direct_gpx_url:
-                            bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(direct_gpx_url)}"
-                        else:
-                            bikegpx_url = None
+                        # --- THE DATA-URI METHOD (Bypasses all servers) ---
+                        # Convert raw GPX string to clean base64 data
+                        b64_gpx = base64.b64encode(gpx_data.encode("utf-8")).decode("utf-8")
+                        data_uri = f"data:application/gpx+xml;base64,{b64_gpx}"
+                        
+                        # Generate the BikeGPX transfer Link
+                        bikegpx_url = f"https://bikegpx.com/?url={urllib.parse.quote(data_uri)}"
                         
                         st.session_state.current_route = {
                             "summary_text": f"📍 Route: {start_coords[2]} ➡️ {end_coords[2]}",
@@ -165,10 +149,7 @@ if st.session_state.current_route:
     st.map(route["coords_df"])
     
     st.write("### 📲 Export Options")
-    if route["bikegpx_url"]:
-        st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", route["bikegpx_url"])
-    else:
-        st.warning("⚠️ Secure transfer setup failed. Please use manual download below instead.")
+    st.link_button("🚀 Send Directly to BikeGPX (Opens QR Code)", route["bikegpx_url"])
         
     st.download_button(
         label="💾 Download GPX File Locally",
